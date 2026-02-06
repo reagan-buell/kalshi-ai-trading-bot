@@ -962,6 +962,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_open_positions(self) -> List[Position]:
         """Get all open positions."""
         async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM positions WHERE status = 'open'"
             )
@@ -969,23 +970,8 @@ class DatabaseManager(TradingLoggerMixin):
             
             positions = []
             for row in rows:
-                # Convert database row to Position object
-                position = Position(
-                    market_id=row[1],
-                    side=row[2],
-                    entry_price=row[3],
-                    quantity=row[4],
-                    timestamp=datetime.fromisoformat(row[5]),
-                    rationale=row[6],
-                    confidence=row[7],
-                    live=bool(row[8]),
-                    status=row[9],
-                    id=row[0],
-                    stop_loss_price=row[10],
-                    take_profit_price=row[11],
-                    max_hold_hours=row[12],
-                    target_confidence_change=row[13]
-                )
-                positions.append(position)
+                position_dict = dict(row)
+                position_dict['timestamp'] = datetime.fromisoformat(position_dict['timestamp'])
+                positions.append(Position(**position_dict))
             
             return positions

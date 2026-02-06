@@ -389,6 +389,7 @@ async def make_decision_for_market(
                     rationale=rationale,
                     confidence=confidence,
                     live=False,
+                    strategy="directional_trading",
                     
                     # Enhanced exit strategy fields using Grok4 recommendations
                     stop_loss_price=exit_strategy['stop_loss_price'],
