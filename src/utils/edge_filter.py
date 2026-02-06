@@ -35,13 +35,13 @@ class EdgeFilter:
     """
     
     # DECREASED: More permissive edge requirements for more trades
-    MIN_EDGE_REQUIREMENT = 0.08        # DECREASED: 8% minimum edge (was 15%)
-    HIGH_CONFIDENCE_EDGE = 0.06        # DECREASED: 6% edge for high confidence (was 12%)  
-    MEDIUM_CONFIDENCE_EDGE = 0.08      # DECREASED: 8% edge for medium confidence (was 15%)
-    LOW_CONFIDENCE_EDGE = 0.12         # DECREASED: 12% edge for low confidence (was 20%)
+    MIN_EDGE_REQUIREMENT = 0.05        # DECREASED: 5% minimum edge (was 8%)
+    HIGH_CONFIDENCE_EDGE = 0.04        # DECREASED: 4% edge for high confidence (was 6%)  
+    MEDIUM_CONFIDENCE_EDGE = 0.06      # DECREASED: 6% edge for medium confidence (was 8%)
+    LOW_CONFIDENCE_EDGE = 0.10         # DECREASED: 10% edge for low confidence (was 12%)
     
     # DECREASED: More permissive filters for more opportunities
-    MIN_CONFIDENCE_FOR_TRADE = 0.50    # DECREASED: 50% minimum confidence (was 65%)
+    MIN_CONFIDENCE_FOR_TRADE = 0.40    # DECREASED: 40% minimum confidence (was 50%)
     MAX_ACCEPTABLE_RISK = 0.6          # INCREASED: 60% max position risk (was 50%)
     
     # UPDATED: More permissive quality filters

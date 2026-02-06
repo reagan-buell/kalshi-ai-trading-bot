@@ -36,18 +36,18 @@ async def process_and_queue_markets(
         has_position = market_data["ticker"] in existing_position_market_ids
 
         market = Market(
-            market_id=market_data["ticker"],
-            title=market_data["title"],
+            market_id=market_data.get("ticker", ""),
+            title=market_data.get("title", "No Title"),
             yes_price=yes_price / 100,
             no_price=no_price / 100,
             volume=volume,
             expiration_ts=int(
                 datetime.fromisoformat(
-                    market_data["expiration_time"].replace("Z", "+00:00")
+                    market_data.get("expiration_time", datetime.now().isoformat()).replace("Z", "+00:00")
                 ).timestamp()
             ),
-            category=market_data["category"],
-            status=market_data["status"],
+            category=market_data.get("category", "Uncategorized"),
+            status=market_data.get("status", "unknown"),
             last_updated=datetime.now(),
             has_position=has_position,
         )

@@ -379,6 +379,8 @@ class KalshiClient(TradingLoggerMixin):
         if expiration_ts:
             order_data["expiration_ts"] = expiration_ts
         
+        self.logger.info(f"📤 Placing order: {json.dumps(order_data)}")
+        
         return await self._make_authenticated_request(
             "POST", "/trade-api/v2/portfolio/orders", json_data=order_data
         )

@@ -23,7 +23,7 @@ async def init_database():
         db_manager = DatabaseManager()
         
         # Create tables
-        await db_manager.create_tables()
+        await db_manager.initialize()
         
         print("✅ Database initialized successfully!")
         print("📊 Created tables:")

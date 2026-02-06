@@ -37,14 +37,25 @@ async def execute_position(
     if live_mode:
         try:
             client_order_id = str(uuid.uuid4())
-            order_response = await kalshi_client.place_order(
-                ticker=position.market_id,
-                client_order_id=client_order_id,
-                side=position.side.lower(),
-                action="buy",
-                count=position.quantity,
-                type_="market"
-            )
+            # Convert entry price to cents
+            price_cents = int(position.entry_price * 100)
+            
+            # Determine which price field to use
+            order_params = {
+                "ticker": position.market_id,
+                "client_order_id": client_order_id,
+                "side": position.side.lower(),
+                "action": "buy",
+                "count": position.quantity,
+                "type_": "market"
+            }
+            
+            if position.side.lower() == "yes":
+                order_params["yes_price"] = price_cents
+            else:
+                order_params["no_price"] = price_cents
+                
+            order_response = await kalshi_client.place_order(**order_params)
             
             # For a market order, the fill price is not guaranteed.
             # A more robust implementation would query the /fills endpoint

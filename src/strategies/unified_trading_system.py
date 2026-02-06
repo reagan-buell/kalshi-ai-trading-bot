@@ -61,9 +61,9 @@ class TradingSystemConfig:
     arbitrage_allocation: float = 0.00      # 0% for arbitrage opportunities
     
     # Risk management
-    max_portfolio_volatility: float = 0.20  # 20% max portfolio vol
-    max_correlation_exposure: float = 0.70  # Max 70% in correlated positions
-    max_single_position: float = 0.15  # Max 15% in any single position
+    max_portfolio_volatility: float = 0.25  # INCREASED: 25% max portfolio vol (was 20%)
+    max_correlation_exposure: float = 0.80  # INCREASED: Max 80% in correlated positions (was 70%)
+    max_single_position: float = 0.20  # INCREASED: Max 20% in any single position (was 15%)
     
     # Performance targets
     target_sharpe_ratio: float = 2.0
