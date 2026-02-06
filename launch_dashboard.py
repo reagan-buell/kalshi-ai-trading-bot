@@ -60,7 +60,7 @@ def launch_dashboard():
     print("✅ All requirements satisfied")
     print("🌐 Launching dashboard...")
     print()
-    print("📊 Dashboard will open in your browser at: http://localhost:8501")
+    print("📊 Dashboard will open in your browser at: http://0.0.0.0:8501")
     print("⏹️ Press Ctrl+C to stop the dashboard")
     print()
     
@@ -72,7 +72,7 @@ def launch_dashboard():
             "streamlit", 
             "run", 
             "trading_dashboard.py",
-            "--server.address", "localhost",
+            "--server.address", "0.0.0.0",
             "--server.port", "8501",
             "--browser.gatherUsageStats", "false"
         ])
