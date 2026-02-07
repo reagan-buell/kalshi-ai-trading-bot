@@ -36,6 +36,7 @@ from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
+from src.utils.market_categorization import get_market_type, MarketType
 
 
 @dataclass
@@ -859,9 +860,39 @@ async def create_market_opportunities_from_markets(
                 logger.warning(f"AI analysis failed for {market.market_id}, skipping")
                 continue
             
+            # NEW: Apply market-type-specific weighting (Prioritize props, reduce combos)
+            market_type = get_market_type(market.title, market.category)
+            
+            # Apply confidence weights
+            original_confidence = confidence
+            if market_type == MarketType.PLAYER_PROP:
+                confidence = min(1.0, confidence * settings.trading.player_prop_confidence_multiplier)
+                logger.info(f"🚀 PLAYER PROP DETECTED: {market.market_id} - Boosting confidence {original_confidence:.1%} -> {confidence:.1%}")
+            elif market_type == MarketType.COMBO:
+                confidence = confidence * settings.trading.combo_bet_confidence_multiplier
+                logger.info(f"⚠️ COMBO BET DETECTED: {market.market_id} - Reducing confidence {original_confidence:.1%} -> {confidence:.1%}")
+
             # Calculate metrics
             edge = predicted_prob - market_prob
+            
+            # Apply edge priority
+            if market_type == MarketType.PLAYER_PROP:
+                # Effectively lower edge requirement by boosting the calculated edge
+                edge_boost = abs(settings.trading.player_prop_min_edge_boost)
+                edge = edge + (edge_boost if edge > 0 else -edge_boost)
+                logger.debug(f"Applied edge boost to Player Prop: {market.market_id}")
+            elif market_type == MarketType.COMBO:
+                # Effectively increase edge requirement by reducing the calculated edge
+                edge_penalty = settings.trading.combo_bet_min_edge_penalty
+                if abs(edge) < edge_penalty:
+                    logger.info(f"⏭️ Skipping COMBO BET {market.market_id} - Edge {abs(edge):.1%} below penalty threshold {edge_penalty:.1%}")
+                    continue
+                edge = edge - (edge_penalty if edge > 0 else -edge_penalty)
+                logger.debug(f"Applied edge penalty to Combo Bet: {market.market_id}")
+            
+            # Calculate metrics (Already calculated and adjusted above for props/combos)
             expected_return = abs(edge) * confidence
+
             volatility = np.sqrt(market_prob * (1 - market_prob))
             max_loss = market_prob if edge > 0 else (1 - market_prob)
             

@@ -368,13 +368,15 @@ class XAIClient(TradingLoggerMixin):
     def _create_search_prompt(self, query: str, max_length: int) -> str:
         """
         Create an optimized search prompt for better results.
+        Optimized for "One-Shot Deep Search" - getting diverse perspectives in one go.
         """
         return f"""Find current, relevant information about: {query}
 
 Focus on:
-- Recent news, data, or announcements
-- Factual information from reliable sources
-- Current conditions or forecasts if applicable
+- Recent news, data, or announcements.
+- DIVERSE PERSPECTIVES: Find both supporting evidence and potential counter-arguments or risks.
+- Factual information from reliable sources.
+- Current conditions or forecasts if applicable.
 
 Provide a brief, factual summary under {max_length//2} words. If no current information is available, clearly state that."""
     
@@ -430,6 +432,46 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
         else:
             truncated_query = query[:100] + "..." if len(query) > 100 else query
             return f"Current information about '{truncated_query}' requires live data access. Analyzing based on available market data and general knowledge. [Fallback: Search unavailable]"
+
+    async def get_fast_analysis(
+        self,
+        market_data: Dict,
+        portfolio_data: Dict
+    ) -> Optional[TradingDecision]:
+        """
+        Perform a very fast, low-cost analysis of a market without search.
+        Used as a Tier-1 gate to decide if expensive research is worth it.
+        """
+        try:
+            prompt = f"""
+            FAST FILTER: Analyze this market purely on price and title. 
+            Does this look like a potentially mispriced market where deep news research could find an edge?
+            
+            Market: {market_data.get('title')}
+            Price: YES {market_data.get('yes_price')}c | NO {market_data.get('no_price')}c
+            
+            Return JSON only:
+            {{"action": "BUY_YES|BUY_NO|SKIP", "side": "YES|NO|NONE", "confidence": 0.0-1.0, "reasoning": "1-sentence fast take"}}
+            """
+            
+            messages = [{"role": "user", "content": prompt}]
+            
+            # Use lower token limit and fallback model if available for speed/cost
+            response_text, _ = await self._make_completion_request(
+                messages=messages,
+                temperature=0.1,
+                max_tokens=200,
+                model=self.fallback_model  # Use faster model for Tier 1
+            )
+            
+            if not response_text:
+                return None
+                
+            return self._parse_trading_decision(response_text)
+            
+        except Exception as e:
+            self.logger.error(f"Error in fast analysis: {e}")
+            return None
 
     async def get_trading_decision(
         self,
@@ -542,11 +584,11 @@ Required format:
     ) -> str:
         """
         Create the full trading prompt with detailed analysis.
+        Uses the EFFICIENT_DECISION_PROMPT_TPL with self-critique.
         """
-        from src.utils.prompts import MULTI_AGENT_PROMPT_TPL
+        from src.utils.prompts import EFFICIENT_DECISION_PROMPT_TPL
         
-        # Use the existing comprehensive prompt
-        return MULTI_AGENT_PROMPT_TPL.format(
+        return EFFICIENT_DECISION_PROMPT_TPL.format(
             title=market_data.get('title', 'Unknown Market'),
             rules=market_data.get('rules', 'No specific rules provided'),
             yes_price=market_data.get('yes_price', 50),
@@ -556,7 +598,6 @@ Required format:
             news_summary=news_summary,
             cash=portfolio_data.get('cash', 1000),
             max_trade_value=portfolio_data.get('max_trade_value', 100),
-            max_position_pct=portfolio_data.get('max_position_pct', 5),
             ev_threshold=10  # 10% EV threshold
         )
 

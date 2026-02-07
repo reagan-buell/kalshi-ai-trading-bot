@@ -93,6 +93,13 @@ class TradingConfig:
         # REMOVED weather and entertainment - trade all categories
     ])
 
+    # Betting category weights (Prioritize props, reduce combos)
+    player_prop_confidence_multiplier: float = 1.25  # Boost props
+    combo_bet_confidence_multiplier: float = 0.50    # Penalize combos
+    player_prop_min_edge_boost: float = -0.02        # Reduce edge requirement by 2%
+    combo_bet_min_edge_penalty: float = 0.05         # Increase edge requirement by 5%
+
+
 
 @dataclass
 class LoggingConfig:

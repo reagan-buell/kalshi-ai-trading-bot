@@ -184,7 +184,24 @@ async def make_decision_for_market(
                         )
                         return position
 
-        # --- Standard LLM Decision-Making ---
+        # --- TIER 1: FAST FILTER GATE ---
+        logger.info("Tier 1: Running fast-filter analysis...")
+        fast_decision = await xai_client.get_fast_analysis(
+            market_data={"title": market.title, "yes_price": market.yes_price, "no_price": market.no_price},
+            portfolio_data=portfolio_data
+        )
+        
+        if not fast_decision or fast_decision.action == "SKIP":
+            logger.info(f"Tier 1 Gate: SKIPPING {market.market_id} - Low initial potential.")
+            # Record it as a skipped tier 1 analysis
+            await db_manager.record_market_analysis(
+                market.market_id, "SKIP_TIER1", 0.0, 0.005, "fast_filter_rejected"
+            )
+            return None
+            
+        logger.info(f"Tier 2 Gate: PROCEEDING with deep analysis for {market.market_id} (Reason: {getattr(fast_decision, 'reasoning', '')})")
+
+        # --- Standard LLM Decision-Making (Tier 2) ---
         logger.info("Proceeding with standard LLM decision analysis.")
         
         # Cost-optimized market data fetching

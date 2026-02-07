@@ -75,6 +75,46 @@ Analyze this prediction market and decide whether to trade.
 """
 
 
+EFFICIENT_DECISION_PROMPT_TPL = """
+You are an elite prediction market strategist. Your goal is to determine the true probability of an event and decide if there is a tradable edge.
+
+### MARKET CONTEXT
+- **Title**: {title}
+- **Rules**: {rules}
+- **Market Prices**: YES {yes_price}c | NO {no_price}c
+- **Volume**: ${volume:,.0f}
+- **Timeline**: {days_to_expiry} days to expiry
+- **News/Context**: {news_summary}
+
+### PORTFOLIO CONTEXT
+- **Available Cash**: ${cash:,.2f}
+- **Max Trade Size**: ${max_trade_value:,.2f}
+
+### ANALYSIS STEPS
+1. **<thinking> (Chain-of-Thought)**:
+   - Analyze the news and rules. How does recent data impact the title's probability?
+   - **DEVIL'S ADVOCATE**: Actively try to find reasons why you might be WRONG. What are the bull/bear risks?
+   - Calculate Estimated Value (EV): EV = (Your Prob * 100) - Market Price.
+   - Determine if the Edge exceeds the {ev_threshold}% requirement.
+
+2. **JSON OUTPUT**:
+   - Provide your final decision in the required JSON format.
+
+### REQUIRED FORMAT
+```json
+{{
+  "action": "BUY" | "SKIP",
+  "side": "YES" | "NO",
+  "limit_price": 1-99,
+  "confidence": 0.0-1.0,
+  "reasoning": "Brief synthesis of your analysis and the devil's advocate points."
+}}
+```
+
+Start your response with <thinking>.
+"""
+
+
 DECISION_PROMPT = """
 Your task is to analyze a given financial market based on the provided data and decide whether to place a trade. The data includes the market ticker, the question the market is based on, the current best prices for "yes" and "no" contracts, and other relevant information.
 
