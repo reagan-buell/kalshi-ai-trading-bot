@@ -72,9 +72,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# @st.cache_data(ttl=60)  # Cache for 1 minute - temporarily disabled
-def load_performance_data():
-    """Load performance data from database."""
+async def get_dashboard_state():
+    """
+    Unified data fetching for the dashboard.
+    Fetches balance, positions, and database stats in a single pass to ensure consistency.
+    """
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -82,189 +84,94 @@ def load_performance_data():
         db_manager = DatabaseManager()
         kalshi_client = KalshiClient()
         
-        async def get_data():
+        async def fetch_all():
             await db_manager.initialize()
             
-            # Get performance by strategy - ensure it's serializable
-            performance_raw = await db_manager.get_performance_by_strategy()
-            
-            # Convert performance data to ensure serializability
-            performance = {}
-            if performance_raw:
-                for strategy, stats in performance_raw.items():
-                    performance[str(strategy)] = {
-                        str(k): float(v) if isinstance(v, (int, float)) else str(v) 
-                        for k, v in stats.items()
-                    }
-            
-            # Get LIVE positions from Kalshi API (not just database)
-            positions_response = await kalshi_client.get_positions()
-            kalshi_positions = positions_response.get('market_positions', [])
-            
-            # Convert Kalshi positions to simple dictionaries for caching
-            positions = []
-            for pos in kalshi_positions:
-                if pos.get('position', 0) != 0:  # Only active positions
-                    ticker = pos.get('ticker')
-                    position_count = pos.get('position', 0)
-                    
-                    # Create a simple dictionary with only serializable types
-                    position_dict = {
-                        'market_id': str(ticker),
-                        'side': 'YES' if position_count > 0 else 'NO',
-                        'quantity': int(abs(position_count)),
-                        'entry_price': 0.50,  # Will be updated below
-                        'timestamp': datetime.now().isoformat(),
-                        'strategy': 'live_sync',
-                        'status': 'open',
-                        'stop_loss_price': None,
-                        'take_profit_price': None
-                    }
-                    
-                    # Try to get current market price for better accuracy
-                    try:
-                        market_data = await kalshi_client.get_market(ticker)
-                        if market_data and 'market' in market_data:
-                            market_info = market_data['market']
-                            if position_count > 0:  # YES position
-                                position_dict['entry_price'] = float(market_info.get('yes_price', 50) / 100)
-                            else:  # NO position
-                                position_dict['entry_price'] = float(market_info.get('no_price', 50) / 100)
-                    except:
-                        position_dict['entry_price'] = 0.50  # Keep default price as float
-                    
-                    positions.append(position_dict)
-            
-            await db_manager.close()
-            
-            return performance, positions
-        
-        performance, positions = loop.run_until_complete(get_data())
-        loop.close()
-        
-        return performance, positions
-        
-    except Exception as e:
-        st.error(f"Error loading performance data: {e}")
-        return {}, []
-
-# @st.cache_data(ttl=30)  # Cache for 30 seconds - temporarily disabled
-def load_llm_data():
-    """Load LLM query data from database."""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        db_manager = DatabaseManager()
-        
-        async def get_data():
-            await db_manager.initialize()
-            
-            # Get recent LLM queries
-            queries = await db_manager.get_llm_queries(hours_back=24, limit=100)
-            
-            # Get LLM stats by strategy with improved token calculation
-            stats = await db_manager.get_llm_stats_by_strategy()
-            
-            # Fix token count issues by recalculating from response lengths if needed
-            for strategy, strategy_stats in stats.items():
-                if strategy_stats.get('total_tokens', 0) == 0:
-                    # Recalculate tokens from query responses for this strategy
-                    strategy_queries = [q for q in queries if q.strategy == strategy]
-                    estimated_tokens = 0
-                    for query in strategy_queries:
-                        # Estimate tokens: ~4 characters per token
-                        prompt_tokens = len(query.prompt) // 4 if query.prompt else 0
-                        response_tokens = len(query.response) // 4 if query.response else 0
-                        estimated_tokens += prompt_tokens + response_tokens
-                    
-                    strategy_stats['total_tokens'] = estimated_tokens
-                    strategy_stats['estimated'] = True
-            
-            await db_manager.close()
-            
-            return queries, stats
-        
-        queries, stats = loop.run_until_complete(get_data())
-        loop.close()
-        
-        return queries, stats
-        
-    except Exception as e:
-        st.error(f"Error loading LLM data: {e}")
-        return [], {}
-
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def load_system_health():
-    """Load system health metrics including both available cash and total portfolio value."""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        kalshi_client = KalshiClient()
-        
-        async def get_health():
-            # Get available cash
+            # 1. Get Financials from API
             balance_response = await kalshi_client.get_balance()
             available_cash = balance_response.get('balance', 0) / 100
             
-            # Get current positions to calculate total portfolio value
+            # 2. Get Open Positions from API
             positions_response = await kalshi_client.get_positions()
             market_positions = positions_response.get('market_positions', [])
             
-            total_position_value = 0
-            positions_count = len(market_positions)
+            total_market_value = 0.0
+            total_entry_cost = 0.0
+            enriched_positions = []
             
-            # Calculate current value of all positions
-            for position in market_positions:
-                try:
-                    ticker = position.get('ticker')
-                    position_count = position.get('position', 0)
-                    
-                    if ticker and position_count != 0:
-                        # Get current market data
+            # Get internal position records from DB to match strategies and entry prices
+            db_positions = await db_manager.get_open_positions()
+            db_pos_map = {p.market_id: p for p in db_positions}
+            
+            # 3. Process each position with live pricing
+            for pos in market_positions:
+                ticker = pos.get('ticker')
+                position_count = pos.get('position', 0)
+                if ticker and position_count != 0:
+                    try:
+                        # Fetch live market data for accurate valuation
                         market_data = await kalshi_client.get_market(ticker)
-                        if market_data and 'market' in market_data:
-                            market_info = market_data['market']
-                            
-                            # Determine if this is a YES or NO position and get current price
-                            # For Kalshi, positive position = YES, negative = NO
-                            if position_count > 0:  # YES position
-                                current_price = market_info.get('yes_price', 50) / 100
-                            else:  # NO position  
-                                current_price = market_info.get('no_price', 50) / 100
-                            
-                            position_value = abs(position_count) * current_price
-                            total_position_value += position_value
-                            
-                except Exception as e:
-                    # If we can't get market data for a position, skip it
-                    print(f"Warning: Could not value position {ticker}: {e}")
-                    continue
+                        market_info = market_data.get('market', {})
+                        
+                        # Use YES or NO price based on position side
+                        if position_count > 0:
+                            current_mid_price = (market_info.get('yes_bid', 50) + market_info.get('yes_ask', 50)) / 200
+                        else:
+                            current_mid_price = (market_info.get('no_bid', 50) + market_info.get('no_ask', 50)) / 200
+                        
+                        market_value = abs(position_count) * current_mid_price
+                        total_market_value += market_value
+                        
+                        # Match with database record
+                        internal_pos = db_pos_map.get(ticker)
+                        entry_price = internal_pos.entry_price if internal_pos else 0.50
+                        strategy = internal_pos.strategy if internal_pos else 'unknown'
+                        
+                        entry_cost = abs(position_count) * entry_price
+                        total_entry_cost += entry_cost
+                        
+                        enriched_positions.append({
+                            'market_id': ticker,
+                            'side': 'YES' if position_count > 0 else 'NO',
+                            'quantity': abs(position_count),
+                            'entry_price': entry_price,
+                            'current_price': current_mid_price,
+                            'market_value': market_value,
+                            'unrealized_pnl': market_value - entry_cost,
+                            'strategy': strategy,
+                            'timestamp': internal_pos.timestamp.isoformat() if internal_pos else datetime.now().isoformat(),
+                            'status': 'open'
+                        })
+                    except Exception as e:
+                        print(f"Warning building position state for {ticker}: {e}")
             
-            # Total portfolio value = cash + position values
-            total_portfolio_value = available_cash + total_position_value
+            # 4. Get Historical Performance
+            performance = await db_manager.get_performance_by_strategy()
             
-            return available_cash, total_portfolio_value, positions_count, total_position_value
-        
-        available_cash, total_portfolio_value, positions_count, position_value = loop.run_until_complete(get_health())
+            # 5. Get LLM Stats
+            llm_queries = await db_manager.get_llm_queries(hours_back=24, limit=100)
+            llm_stats = await db_manager.get_llm_stats_by_strategy()
+            
+            await db_manager.close()
+            
+            return {
+                'available_cash': available_cash,
+                'total_market_value': total_market_value,
+                'portfolio_value': available_cash + total_market_value,
+                'unrealized_pnl': total_market_value - total_entry_cost,
+                'positions': enriched_positions,
+                'performance': performance,
+                'llm_queries': llm_queries,
+                'llm_stats': llm_stats,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+        result = loop.run_until_complete(fetch_all())
         loop.close()
-        
-        return {
-            'available_cash': available_cash,
-            'total_portfolio_value': total_portfolio_value, 
-            'positions_count': positions_count,
-            'position_value': position_value
-        }
-        
+        return result
     except Exception as e:
-        st.error(f"Error loading system health: {e}")
-        return {
-            'available_cash': 0.0,
-            'total_portfolio_value': 0.0,
-            'positions_count': 0,
-            'position_value': 0.0
-        }
+        st.error(f"Failed to fetch dashboard state: {e}")
+        return None
 
 def main():
     """Main dashboard function."""
@@ -294,38 +201,34 @@ def main():
         ]
     )
     
-    # Load data with error handling
-    try:
-        performance_data, positions = load_performance_data()
-        llm_queries, llm_stats = load_llm_data()
-        system_health_data = load_system_health()
-    except Exception as e:
-        st.error(f"Error loading dashboard data: {e}")
-        st.info("Please check your system connections and try refreshing.")
+    # Load data
+    state = asyncio.run(get_dashboard_state())
+    if not state:
+        st.error("Failed to load dashboard data. Please check your connection.")
         return
     
     # Show data status in sidebar
     st.sidebar.markdown("---")
     st.sidebar.markdown("**📊 Data Status:**")
-    st.sidebar.metric("Active Positions", len(positions) if positions else 0)
-    st.sidebar.metric("LLM Queries (24h)", len(llm_queries) if llm_queries else 0)
-    st.sidebar.metric("Portfolio Balance", f"${system_health_data.get('total_portfolio_value', 0):.2f}")
+    st.sidebar.metric("Active Positions", len(state['positions']))
+    st.sidebar.metric("LLM Queries (24h)", len(state['llm_queries']))
+    st.sidebar.metric("Portfolio Balance", f"${state['portfolio_value']:.2f}")
     
     # Page routing
     if page == "📈 Overview":
-        show_overview(performance_data, positions, system_health_data)
+        show_overview(state)
     elif page == "🎯 Strategy Performance":
-        show_strategy_performance(performance_data)
+        show_strategy_performance(state['performance'])
     elif page == "🤖 LLM Analysis":
-        show_llm_analysis(llm_queries, llm_stats)
+        show_llm_analysis(state['llm_queries'], state['llm_stats'])
     elif page == "💼 Positions & Trades":
-        show_positions_trades(positions)
+        show_positions_trades(state['positions'])
     elif page == "⚠️ Risk Management":
-        show_risk_management(performance_data, positions, system_health_data['total_portfolio_value'])
+        show_risk_management(state['performance'], state['positions'], state['portfolio_value'])
     elif page == "🔧 System Health":
-        show_system_health(system_health_data['available_cash'], system_health_data['positions_count'], llm_stats)
+        show_system_health(state)
 
-def show_overview(performance_data, positions, system_health_data):
+def show_overview(state):
     """Show overview dashboard."""
     
     st.header("📈 System Overview")
@@ -336,8 +239,8 @@ def show_overview(performance_data, positions, system_health_data):
     with col1:
         st.metric(
             label="💰 Portfolio Balance",
-            value=f"${system_health_data['total_portfolio_value']:.2f}",
-            help="Total portfolio value: cash + current positions"
+            value=f"${state['portfolio_value']:.2f}",
+            help="Total portfolio value: cash + current market value of positions"
         )
     
     # Add second row for additional financial metrics
@@ -346,18 +249,19 @@ def show_overview(performance_data, positions, system_health_data):
     with col1b:
         st.metric(
             label="💵 Available Cash",
-            value=f"${system_health_data['available_cash']:.2f}",
+            value=f"${state['available_cash']:.2f}",
             help="Cash available for new trades"
         )
     
     with col2b:
         st.metric(
             label="📊 Position Value",
-            value=f"${system_health_data['position_value']:.2f}",
-            help="Current market value of all positions"
+            value=f"${state['total_market_value']:.2f}",
+            help="Current market value of all open positions"
         )
     
     with col2:
+        performance_data = state['performance']
         total_trades = sum(stats.get('completed_trades', 0) for stats in performance_data.values()) if performance_data else 0
         st.metric(
             label="📈 Total Trades",
@@ -368,40 +272,27 @@ def show_overview(performance_data, positions, system_health_data):
     with col3:
         # Calculate both realized and unrealized P&L
         realized_pnl = sum(stats.get('total_pnl', 0) for stats in performance_data.values()) if performance_data else 0
-        
-        # Calculate unrealized P&L from current positions
-        unrealized_pnl = 0
-        if positions:
-            # This is a rough estimate - in practice you'd get current market prices
-            for pos in positions:
-                # Position is now a dictionary
-                if 'entry_price' in pos and 'quantity' in pos:
-                    # Estimate current value vs entry value
-                    # For demo purposes, we'll use a simple calculation
-                    position_value = pos['entry_price'] * pos['quantity']
-                    # Assume current value is similar to entry (this would be calculated with live prices)
-                    unrealized_pnl += 0  # Placeholder - would need current market prices
-        
+        unrealized_pnl = state['unrealized_pnl']
         total_pnl = realized_pnl + unrealized_pnl
         
         st.metric(
             label="💹 Total P&L",
             value=f"${total_pnl:.2f}",
-            delta=f"Realized: ${realized_pnl:.2f}, Unrealized: ${unrealized_pnl:.2f}",
-            help="Total profit/loss: realized from completed trades + unrealized from open positions"
+            delta=f"Unrealized: ${unrealized_pnl:+.2f}",
+            help=f"Realized: ${realized_pnl:.2f} | Unrealized: ${unrealized_pnl:.2f}"
         )
     
     with col4:
         st.metric(
             label="🎯 Active Positions",
-            value=len(positions) if positions else 0,
+            value=len(state['positions']),
             help="Currently open positions"
         )
     
     with col3b:
         # Portfolio utilization
-        if system_health_data['total_portfolio_value'] > 0:
-            utilization_pct = (system_health_data['position_value'] / system_health_data['total_portfolio_value']) * 100
+        if state['portfolio_value'] > 0:
+            utilization_pct = (state['total_market_value'] / state['portfolio_value']) * 100
         else:
             utilization_pct = 0
         st.metric(
@@ -411,20 +302,19 @@ def show_overview(performance_data, positions, system_health_data):
         )
     
     with col4b:
-        # Cash utilization  
-        if system_health_data['available_cash'] > 0:
-            initial_cash = system_health_data['total_portfolio_value']  # Approximation
-            cash_used_pct = ((initial_cash - system_health_data['available_cash']) / initial_cash) * 100 if initial_cash > 0 else 0
+        # P&L Margin
+        if state['portfolio_value'] > 0:
+            pnl_margin = (total_pnl / (state['portfolio_value'] - total_pnl) * 100) if (state['portfolio_value'] - total_pnl) != 0 else 0
         else:
-            cash_used_pct = 100
+            pnl_margin = 0
         st.metric(
-            label="💸 Cash Deployed",
-            value=f"{min(100, max(0, cash_used_pct)):.1f}%", 
-            help="Percentage of original cash now in positions"
+            label="📈 Total Return",
+            value=f"{pnl_margin:+.1f}%",
+            help="Overall portfolio return percentage"
         )
-    
+
     # Strategy performance summary
-    if performance_data:
+    if state['performance']:
         st.subheader("🎯 Strategy Performance Summary")
         
         # Create strategy performance chart
@@ -433,7 +323,7 @@ def show_overview(performance_data, positions, system_health_data):
         strategy_trades = []
         strategy_win_rates = []
         
-        for strategy, stats in performance_data.items():
+        for strategy, stats in state['performance'].items():
             strategy_names.append(strategy.replace('_', ' ').title())
             strategy_pnl.append(stats.get('total_pnl', 0))
             strategy_trades.append(stats.get('completed_trades', 0))
@@ -446,7 +336,7 @@ def show_overview(performance_data, positions, system_health_data):
             fig_pnl = px.bar(
                 x=strategy_names,
                 y=strategy_pnl,
-                title="P&L by Strategy",
+                title="Historical P&L by Strategy",
                 labels={'x': 'Strategy', 'y': 'P&L ($)'},
                 color=strategy_pnl,
                 color_continuous_scale='RdYlGn'
@@ -470,15 +360,12 @@ def show_overview(performance_data, positions, system_health_data):
         st.info("📊 **No strategy data yet** - Run the trading system to start collecting performance data")
     
     # Recent activity summary
-    st.subheader("📋 Recent Activity")
+    st.subheader("📋 Active Positions Breakdown")
     
-    if positions:
-        st.write(f"**{len(positions)} active positions:**")
-        
+    if state['positions']:
         # Show top positions by value
         position_data = []
-        for pos in positions[:10]:  # Top 10
-            # Convert timestamp string back to datetime for display
+        for pos in state['positions'][:10]:  # Top 10
             try:
                 timestamp = datetime.fromisoformat(pos['timestamp'])
                 time_str = timestamp.strftime('%m/%d %H:%M')
@@ -486,13 +373,14 @@ def show_overview(performance_data, positions, system_health_data):
                 time_str = 'Unknown'
             
             position_data.append({
-                'Market': pos['market_id'][:25] + '...' if len(pos['market_id']) > 25 else pos['market_id'],
+                'Market': pos['market_id'][:30] + '...',
+                'Strategy': (pos['strategy'] or 'unknown').replace('_', ' ').title(),
                 'Side': pos['side'],
-                'Quantity': pos['quantity'],
-                'Entry Price': f"${pos['entry_price']:.3f}",
-                'Value': f"${pos['quantity'] * pos['entry_price']:.2f}",
-                'Strategy': pos['strategy'] or 'Unknown',
-                'Time': time_str
+                'Qty': pos['quantity'],
+                'Entry': f"${pos['entry_price']:.3f}",
+                'Current': f"${pos['current_price']:.3f}",
+                'P&L': f"{pos['unrealized_pnl']:+.2f}",
+                'Value': f"${pos['market_value']:.2f}"
             })
         
         if position_data:
@@ -772,7 +660,6 @@ def show_positions_trades(positions):
     # Create positions DataFrame
     position_data = []
     for pos in positions:
-        # Convert timestamp string back to datetime for display
         try:
             timestamp = datetime.fromisoformat(pos['timestamp'])
             time_str = timestamp.strftime('%m/%d %H:%M')
@@ -781,15 +668,14 @@ def show_positions_trades(positions):
         
         position_data.append({
             'Market ID': pos['market_id'],
-            'Strategy': pos['strategy'] or 'Unknown',
+            'Strategy': (pos['strategy'] or 'unknown').replace('_', ' ').title(),
             'Side': pos['side'],
-            'Quantity': pos['quantity'],
-            'Entry Price': f"${pos['entry_price']:.3f}",
-            'Position Value': f"${pos['quantity'] * pos['entry_price']:.2f}",
-            'Entry Time': time_str,
-            'Status': pos['status'],
-            'Stop Loss': f"${pos['stop_loss_price']:.3f}" if pos['stop_loss_price'] else "None",
-            'Take Profit': f"${pos['take_profit_price']:.3f}" if pos['take_profit_price'] else "None"
+            'Qty': pos['quantity'],
+            'Entry': f"${pos['entry_price']:.3f}",
+            'Current': f"${pos['current_price']:.3f}",
+            'P&L': f"{pos['unrealized_pnl']:+.2f}",
+            'Value': f"${pos['market_value']:.2f}",
+            'Time': time_str
         })
     
     df_positions = pd.DataFrame(position_data)
@@ -986,7 +872,7 @@ def show_risk_management(performance_data, positions, system_balance):
         with col4:
             st.metric("Max Single Position", "Error")
 
-def show_system_health(available_cash, positions_count, llm_stats):
+def show_system_health(state):
     """Show system health and monitoring."""
     
     st.header("🔧 System Health")
@@ -998,14 +884,15 @@ def show_system_health(available_cash, positions_count, llm_stats):
     
     with col1:
         st.success("✅ **Kalshi Connection**: Active")
-        st.write(f"Available Cash: ${available_cash:.2f}")
-        st.write(f"Positions: {positions_count}")
+        st.write(f"Available Cash: ${state['available_cash']:.2f}")
+        st.write(f"Live Positions: {len(state['positions'])}")
     
     with col2:
+        llm_stats = state['llm_stats']
         if llm_stats:
             st.success("✅ **LLM Integration**: Active")
             total_queries = sum(stats['query_count'] for stats in llm_stats.values())
-            st.write(f"Queries (7d): {total_queries}")
+            st.write(f"Queries (24h): {total_queries}")
         else:
             st.warning("⚠️ **LLM Logging**: No data")
     
@@ -1019,53 +906,35 @@ def show_system_health(available_cash, positions_count, llm_stats):
     if llm_stats:
         st.write("**Recent LLM Activity:**")
         for strategy, stats in llm_stats.items():
-            if stats['last_query']:
-                last_query_time = datetime.fromisoformat(stats['last_query'])
-                time_ago = datetime.now() - last_query_time
-                
-                if time_ago.days > 0:
-                    time_str = f"{time_ago.days} days ago"
-                elif time_ago.seconds > 3600:
-                    time_str = f"{time_ago.seconds // 3600} hours ago"
-                else:
-                    time_str = f"{time_ago.seconds // 60} minutes ago"
-                
-                st.write(f"- **{strategy}**: Last query {time_str}")
+            if stats.get('last_query'):
+                try:
+                    last_query_time = datetime.fromisoformat(stats['last_query'])
+                    time_ago = datetime.now() - last_query_time
+                    
+                    if time_ago.days > 0:
+                        time_str = f"{time_ago.days} days ago"
+                    elif time_ago.seconds > 3600:
+                        time_str = f"{time_ago.seconds // 3600} hours ago"
+                    else:
+                        time_str = f"{time_ago.seconds // 60} minutes ago"
+                    
+                    st.write(f"- **{strategy.replace('_', ' ').title()}**: Last query {time_str}")
+                except:
+                    continue
     
     # Configuration summary
     st.subheader("⚙️ Configuration")
     
     config_info = {
         "Database Path": "trading_system.db",
-        "Dashboard Refresh": "Auto (1 min cache)",
+        "Dashboard Refresh": "Auto (High Speed Unified Load)",
         "LLM Logging": "Enabled" if llm_stats else "Pending first query",
-        "Strategy Tracking": "Enabled",
+        "BTC Arbitrage Feed": "Coinbase WS (Active)",
         "Risk Management": "Active"
     }
     
     for key, value in config_info.items():
         st.write(f"**{key}:** {value}")
-    
-    # System recommendations
-    st.subheader("💡 Recommendations")
-    
-    recommendations = []
-    
-    if available_cash < 100:
-        recommendations.append("💰 Consider increasing account balance for more trading opportunities")
-    
-    if not llm_stats:
-        recommendations.append("🤖 LLM query logging will begin with next trading cycle")
-    
-    total_queries = sum(stats['query_count'] for stats in llm_stats.values()) if llm_stats else 0
-    if total_queries > 1000:
-        recommendations.append("📊 High LLM usage - consider optimizing query frequency")
-    
-    if recommendations:
-        for rec in recommendations:
-            st.info(rec)
-    else:
-        st.success("✅ System running optimally - no recommendations at this time")
 
 if __name__ == "__main__":
     main() 
