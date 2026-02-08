@@ -127,6 +127,20 @@ async def run_ingestion(
             else:
                 logger.warning(f"Could not find market with ticker: {market_ticker}")
         else:
+            # 🚀 BEAST MODE ARBITRAGE: Prioritize Bitcoin markets
+            logger.info("🎯 TARGETED INGESTION: Fetching Bitcoin markets first...")
+            btc_response = await kalshi_client.get_markets(limit=100, series_ticker="BTC")
+            btc_markets = btc_response.get("markets", [])
+            if btc_markets:
+                logger.info(f"Fetched {len(btc_markets)} specialized BTC markets.")
+                await process_and_queue_markets(
+                    btc_markets,
+                    db_manager,
+                    queue,
+                    existing_position_market_ids,
+                    logger,
+                )
+
             logger.info("Fetching all active markets from Kalshi API with pagination.")
             cursor = None
             while True:

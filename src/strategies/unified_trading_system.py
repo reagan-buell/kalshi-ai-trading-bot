@@ -49,16 +49,18 @@ from src.strategies.quick_flip_scalping import (
     run_quick_flip_strategy,
     QuickFlipConfig
 )
+from src.strategies.btc_arbitrage import BTCArbitrageStrategy
+from src.clients.coinbase_ws_client import CoinbaseWSClient
 
 
 @dataclass
 class TradingSystemConfig:
     """Configuration for the unified trading system."""
     # Capital allocation across strategies
-    market_making_allocation: float = 0.30  # 30% for market making
-    directional_trading_allocation: float = 0.40  # 40% for directional positions
-    quick_flip_allocation: float = 0.30     # 30% for quick flip scalping
-    arbitrage_allocation: float = 0.00      # 0% for arbitrage opportunities
+    market_making_allocation: float = 0.25  # 25% for market making
+    directional_trading_allocation: float = 0.30  # 30% for directional positions
+    quick_flip_allocation: float = 0.25     # 25% for quick flip scalping
+    arbitrage_allocation: float = 0.20      # 20% for arbitrage opportunities
     
     # Risk management
     max_portfolio_volatility: float = 0.25  # INCREASED: 25% max portfolio vol (was 20%)
@@ -148,6 +150,13 @@ class UnifiedAdvancedTradingSystem:
         self.system_metrics = {}
         
         # Capital allocation will be set by async_initialize() after getting actual balance
+        self.market_maker = AdvancedMarketMaker(self.db_manager, self.kalshi_client, self.xai_client)
+        self.portfolio_optimizer = AdvancedPortfolioOptimizer(self.db_manager, self.kalshi_client, self.xai_client)
+        
+        # New high-speed BTC arbitrage
+        self.coinbase_ws = CoinbaseWSClient(product_id="BTC-USD")
+        self.btc_arb = BTCArbitrageStrategy(self.db_manager, self.kalshi_client, self.coinbase_ws)
+        
 
     async def async_initialize(self):
         """
@@ -191,6 +200,9 @@ class UnifiedAdvancedTradingSystem:
             
             self.logger.info(f"💰 PORTFOLIO VALUE: Cash=${available_cash:.2f} + Positions=${total_position_value:.2f} = Total=${self.total_capital:.2f}")
             
+            # Start high-speed feed
+            asyncio.create_task(self.coinbase_ws.start())
+            
             if self.total_capital < 10:  # Minimum $10 to trade
                 self.logger.warning(f"⚠️ Total capital too low: ${self.total_capital:.2f} - may limit trading")
                 
@@ -205,8 +217,7 @@ class UnifiedAdvancedTradingSystem:
         self.arbitrage_capital = self.total_capital * self.config.arbitrage_allocation
         
         # Initialize strategy modules with actual capital
-        self.market_maker = AdvancedMarketMaker(self.db_manager, self.kalshi_client, self.xai_client)
-        self.portfolio_optimizer = AdvancedPortfolioOptimizer(self.db_manager, self.kalshi_client, self.xai_client)
+        self.btc_arb = BTCArbitrageStrategy(self.db_manager, self.kalshi_client, self.coinbase_ws)
         
         self.logger.info(f"🎯 CAPITAL ALLOCATION: Market Making=${self.market_making_capital:.2f}, Directional=${self.directional_capital:.2f}, Quick Flip=${self.quick_flip_capital:.2f}, Arbitrage=${self.arbitrage_capital:.2f}")
 
@@ -269,10 +280,11 @@ class UnifiedAdvancedTradingSystem:
             self.logger.info(f"Analyzing {len(markets)} markets across all strategies")
             
             # Step 2: Parallel strategy analysis
-            market_making_results, portfolio_allocation, quick_flip_results = await asyncio.gather(
+            market_making_results, portfolio_allocation, quick_flip_results, btc_arbitrage_results = await asyncio.gather(
                 self._execute_market_making_strategy(markets),
                 self._execute_directional_trading_strategy(markets),
-                self._execute_quick_flip_strategy(markets)
+                self._execute_quick_flip_strategy(markets),
+                self._execute_btc_arbitrage_strategy()
             )
             
             # Step 3: Execute arbitrage opportunities
@@ -280,7 +292,7 @@ class UnifiedAdvancedTradingSystem:
             
             # Step 4: Compile results
             results = self._compile_unified_results(
-                market_making_results, portfolio_allocation, quick_flip_results, arbitrage_results
+                market_making_results, portfolio_allocation, quick_flip_results, arbitrage_results, btc_arbitrage_results
             )
             
             # Step 4.5: Log if no positions were created (removed emergency fallback)
@@ -430,6 +442,57 @@ class UnifiedAdvancedTradingSystem:
         except Exception as e:
             self.logger.error(f"Error in quick flip strategy: {e}")
             return {'positions_created': 0, 'sell_orders_placed': 0, 'total_capital_used': 0.0}
+
+    async def _execute_btc_arbitrage_strategy(self) -> Dict:
+        """
+        Execute high-frequency BTC arbitrage strategy.
+        """
+        try:
+            self.logger.info(f"🎯 Executing BTC Arbitrage Strategy")
+            
+            # Find opportunities
+            opportunities = await self.btc_arb.find_arbitrage_opportunities()
+            
+            if not opportunities:
+                self.logger.info("No BTC arbitrage opportunities found")
+                return {'trades_executed': 0, 'total_capital_used': 0.0, 'expected_profit': 0.0}
+            
+            # Execute top opportunities
+            executed_count = 0
+            total_capital = 0.0
+            total_profit = 0.0
+            
+            # Limit to top opportunities within arbitrage allocation
+            for opp in opportunities:
+                if total_capital >= self.arbitrage_capital:
+                    break
+                    
+                # Execute individual opportunity
+                # We use a portion of arb capital for each
+                trade_capital = min(50.0, self.arbitrage_capital - total_capital)
+                if trade_capital < 1.0: break
+                
+                await self.btc_arb.execute_arbitrage(opp, trade_capital)
+                
+                executed_count += 1
+                total_capital += trade_capital
+                total_profit += opp['edge'] * trade_capital
+            
+            self.logger.info(
+                f"✅ BTC Arbitrage: {executed_count} trades, "
+                f"${total_capital:.0f} capital used, "
+                f"${total_profit:.2f} expected profit"
+            )
+            
+            return {
+                'trades_executed': executed_count,
+                'total_capital_used': total_capital,
+                'expected_profit': total_profit
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error in BTC arbitrage strategy: {e}")
+            return {'trades_executed': 0, 'total_capital_used': 0.0, 'expected_profit': 0.0}
 
     async def _execute_portfolio_allocations(
         self, 
@@ -656,36 +719,42 @@ class UnifiedAdvancedTradingSystem:
         market_making_results: Dict, 
         portfolio_allocation: PortfolioAllocation,
         quick_flip_results: Dict,
-        arbitrage_results: Dict
+        arbitrage_results: Dict,
+        btc_arbitrage_results: Dict = None
     ) -> TradingSystemResults:
         """
         Compile results from all strategies into unified metrics.
         """
+        if btc_arbitrage_results is None:
+            btc_arbitrage_results = {'trades_executed': 0, 'total_capital_used': 0.0, 'expected_profit': 0.0}
+            
         try:
             # Calculate total metrics
             total_capital_used = (
                 market_making_results.get('total_exposure', 0) +
                 portfolio_allocation.total_capital_used +
                 quick_flip_results.get('total_capital_used', 0) +
-                arbitrage_results.get('arbitrage_exposure', 0)
+                arbitrage_results.get('arbitrage_exposure', 0) +
+                btc_arbitrage_results.get('total_capital_used', 0)
             )
             
             # Weight expected returns by capital allocation
             mm_weight = market_making_results.get('total_exposure', 0) / (total_capital_used + 1e-8)
             dir_weight = portfolio_allocation.total_capital_used / (total_capital_used + 1e-8)
             qf_weight = quick_flip_results.get('total_capital_used', 0) / (total_capital_used + 1e-8)
-            arb_weight = arbitrage_results.get('arbitrage_exposure', 0) / (total_capital_used + 1e-8)
+            arb_weight = (arbitrage_results.get('arbitrage_exposure', 0) + btc_arbitrage_results.get('total_capital_used', 0)) / (total_capital_used + 1e-8)
             
             # Portfolio expected return (weighted average)
             portfolio_expected_return = (
                 mm_weight * market_making_results.get('expected_profit', 0) +
                 dir_weight * portfolio_allocation.expected_portfolio_return +
                 qf_weight * quick_flip_results.get('expected_profit', 0) +
-                arb_weight * arbitrage_results.get('arbitrage_profit', 0)
+                arb_weight * (arbitrage_results.get('arbitrage_profit', 0) + btc_arbitrage_results.get('expected_profit', 0))
             )
             
-            # Annualize expected return (assume positions held for 30 days average)
-            expected_annual_return = portfolio_expected_return * (365 / 30)
+            # Annualize expected return (assume positions held for 30 days average, but arbs are 1 day)
+            # This is a rough estimation
+            expected_annual_return = portfolio_expected_return * (365 / 7) # Conservative 7 day hold average
             
             # Capital efficiency
             capital_efficiency = total_capital_used / self.total_capital
@@ -695,7 +764,8 @@ class UnifiedAdvancedTradingSystem:
                 market_making_results.get('orders_placed', 0) // 2 +  # 2 orders per position
                 len(portfolio_allocation.allocations) +
                 quick_flip_results.get('positions_created', 0) +
-                arbitrage_results.get('arbitrage_trades', 0)
+                arbitrage_results.get('arbitrage_trades', 0) +
+                btc_arbitrage_results.get('trades_executed', 0)
             )
             
             return TradingSystemResults(
