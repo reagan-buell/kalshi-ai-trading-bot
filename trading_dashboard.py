@@ -78,97 +78,90 @@ async def get_dashboard_state():
     Fetches balance, positions, and database stats in a single pass to ensure consistency.
     """
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
         db_manager = DatabaseManager()
         kalshi_client = KalshiClient()
         
-        async def fetch_all():
-            await db_manager.initialize()
+        await db_manager.initialize()
+        
+        # 1. Get Financials from API
+        balance_response = await kalshi_client.get_balance()
+        available_cash = balance_response.get('balance', 0) / 100
+        
+        # 2. Get Open Positions from API
+        positions_response = await kalshi_client.get_positions()
+        market_positions = positions_response.get('market_positions', [])
+        
+        total_market_value = 0.0
+        total_entry_cost = 0.0
+        enriched_positions = []
+        
+        # Get internal position records from DB to match strategies and entry prices
+        db_positions = await db_manager.get_open_positions()
+        db_pos_map = {p.market_id: p for p in db_positions}
+        
+        # 3. Process each position with live pricing
+        for pos in market_positions:
+            ticker = pos.get('ticker')
+            position_count = pos.get('position', 0)
+            if ticker and position_count != 0:
+                try:
+                    # Fetch live market data for accurate valuation
+                    market_data = await kalshi_client.get_market(ticker)
+                    market_info = market_data.get('market', {})
+                    
+                    # Use YES or NO price based on position side
+                    if position_count > 0:
+                        current_mid_price = (market_info.get('yes_bid', 50) + market_info.get('yes_ask', 50)) / 200
+                    else:
+                        current_mid_price = (market_info.get('no_bid', 50) + market_info.get('no_ask', 50)) / 200
+                    
+                    market_value = abs(position_count) * current_mid_price
+                    total_market_value += market_value
+                    
+                    # Match with database record
+                    internal_pos = db_pos_map.get(ticker)
+                    entry_price = internal_pos.entry_price if internal_pos else 0.50
+                    strategy = internal_pos.strategy if internal_pos else 'unknown'
+                    
+                    entry_cost = abs(position_count) * entry_price
+                    total_entry_cost += entry_cost
+                    
+                    enriched_positions.append({
+                        'market_id': ticker,
+                        'side': 'YES' if position_count > 0 else 'NO',
+                        'quantity': abs(position_count),
+                        'entry_price': entry_price,
+                        'current_price': current_mid_price,
+                        'market_value': market_value,
+                        'unrealized_pnl': market_value - entry_cost,
+                        'strategy': strategy,
+                        'timestamp': internal_pos.timestamp.isoformat() if internal_pos else datetime.now().isoformat(),
+                        'status': 'open'
+                    })
+                except Exception as e:
+                    print(f"Warning building position state for {ticker}: {e}")
+        
+        # 4. Get Historical Performance
+        performance = await db_manager.get_performance_by_strategy()
+        
+        # 5. Get LLM Stats
+        llm_queries = await db_manager.get_llm_queries(hours_back=24, limit=100)
+        llm_stats = await db_manager.get_llm_stats_by_strategy()
+        
+        await db_manager.close()
+        
+        return {
+            'available_cash': available_cash,
+            'total_market_value': total_market_value,
+            'portfolio_value': available_cash + total_market_value,
+            'unrealized_pnl': total_market_value - total_entry_cost,
+            'positions': enriched_positions,
+            'performance': performance,
+            'llm_queries': llm_queries,
+            'llm_stats': llm_stats,
+            'timestamp': datetime.now().isoformat()
+        }
             
-            # 1. Get Financials from API
-            balance_response = await kalshi_client.get_balance()
-            available_cash = balance_response.get('balance', 0) / 100
-            
-            # 2. Get Open Positions from API
-            positions_response = await kalshi_client.get_positions()
-            market_positions = positions_response.get('market_positions', [])
-            
-            total_market_value = 0.0
-            total_entry_cost = 0.0
-            enriched_positions = []
-            
-            # Get internal position records from DB to match strategies and entry prices
-            db_positions = await db_manager.get_open_positions()
-            db_pos_map = {p.market_id: p for p in db_positions}
-            
-            # 3. Process each position with live pricing
-            for pos in market_positions:
-                ticker = pos.get('ticker')
-                position_count = pos.get('position', 0)
-                if ticker and position_count != 0:
-                    try:
-                        # Fetch live market data for accurate valuation
-                        market_data = await kalshi_client.get_market(ticker)
-                        market_info = market_data.get('market', {})
-                        
-                        # Use YES or NO price based on position side
-                        if position_count > 0:
-                            current_mid_price = (market_info.get('yes_bid', 50) + market_info.get('yes_ask', 50)) / 200
-                        else:
-                            current_mid_price = (market_info.get('no_bid', 50) + market_info.get('no_ask', 50)) / 200
-                        
-                        market_value = abs(position_count) * current_mid_price
-                        total_market_value += market_value
-                        
-                        # Match with database record
-                        internal_pos = db_pos_map.get(ticker)
-                        entry_price = internal_pos.entry_price if internal_pos else 0.50
-                        strategy = internal_pos.strategy if internal_pos else 'unknown'
-                        
-                        entry_cost = abs(position_count) * entry_price
-                        total_entry_cost += entry_cost
-                        
-                        enriched_positions.append({
-                            'market_id': ticker,
-                            'side': 'YES' if position_count > 0 else 'NO',
-                            'quantity': abs(position_count),
-                            'entry_price': entry_price,
-                            'current_price': current_mid_price,
-                            'market_value': market_value,
-                            'unrealized_pnl': market_value - entry_cost,
-                            'strategy': strategy,
-                            'timestamp': internal_pos.timestamp.isoformat() if internal_pos else datetime.now().isoformat(),
-                            'status': 'open'
-                        })
-                    except Exception as e:
-                        print(f"Warning building position state for {ticker}: {e}")
-            
-            # 4. Get Historical Performance
-            performance = await db_manager.get_performance_by_strategy()
-            
-            # 5. Get LLM Stats
-            llm_queries = await db_manager.get_llm_queries(hours_back=24, limit=100)
-            llm_stats = await db_manager.get_llm_stats_by_strategy()
-            
-            await db_manager.close()
-            
-            return {
-                'available_cash': available_cash,
-                'total_market_value': total_market_value,
-                'portfolio_value': available_cash + total_market_value,
-                'unrealized_pnl': total_market_value - total_entry_cost,
-                'positions': enriched_positions,
-                'performance': performance,
-                'llm_queries': llm_queries,
-                'llm_stats': llm_stats,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-        result = loop.run_until_complete(fetch_all())
-        loop.close()
-        return result
     except Exception as e:
         st.error(f"Failed to fetch dashboard state: {e}")
         return None
