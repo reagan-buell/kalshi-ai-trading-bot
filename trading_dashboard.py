@@ -110,10 +110,18 @@ async def get_dashboard_state():
                     market_info = market_data.get('market', {})
                     
                     # Use YES or NO price based on position side
+                    # IMPORTANT: Kalshi returns yes_bid/yes_ask. NO price is 100 - YES price.
                     if position_count > 0:
+                        # YES position: use YES mid price
                         current_mid_price = (market_info.get('yes_bid', 50) + market_info.get('yes_ask', 50)) / 200
                     else:
-                        current_mid_price = (market_info.get('no_bid', 50) + market_info.get('no_ask', 50)) / 200
+                        # NO position: use NO mid price (derived from YES prices)
+                        # NO_bid = 100 - YES_ask, NO_ask = 100 - YES_bid
+                        yes_bid = market_info.get('yes_bid', 50)
+                        yes_ask = market_info.get('yes_ask', 50)
+                        no_bid = 100 - yes_ask
+                        no_ask = 100 - yes_bid
+                        current_mid_price = (no_bid + no_ask) / 200
                     
                     market_value = abs(position_count) * current_mid_price
                     total_market_value += market_value
@@ -708,8 +716,8 @@ def show_positions_trades(positions):
         col1, col2 = st.columns(2)
         
         with col1:
-            # Value by strategy
-            strategy_values = filtered_df.groupby('Strategy')['Position Value'].apply(
+            # Value by strategy - Fix for KeyError: 'Position Value'
+            strategy_values = filtered_df.groupby('Strategy')['Value'].apply(
                 lambda x: x.str.replace('$', '').astype(float).sum()
             )
             

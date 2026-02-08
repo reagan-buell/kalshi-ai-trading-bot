@@ -400,6 +400,16 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
             has_citations=bool(getattr(response, 'citations', None))
         )
         
+        # Log the search query and cost to database
+        asyncio.create_task(self._log_query(
+            strategy="search",  # Categorize as search
+            query_type="live_search",
+            prompt=original_query,
+            response=response.content,
+            tokens_used=sources_used,  # Sources as a proxy for token-like units if needed
+            cost_usd=search_cost
+        ))
+        
         # Truncate response to requested length
         search_result = self._truncate_news_summary(response.content, max_length)
         
@@ -466,8 +476,20 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
             
             if not response_text:
                 return None
+            
+            decision = self._parse_trading_decision(response_text)
+            
+            # Log the query and response
+            asyncio.create_task(self._log_query(
+                strategy="fast_filter",
+                query_type="tier1_fast",
+                prompt=prompt,
+                response=response_text,
+                market_id=market_data.get('ticker'),
+                cost_usd=cost
+            ))
                 
-            return self._parse_trading_decision(response_text)
+            return decision
             
         except Exception as e:
             self.logger.error(f"Error in fast analysis: {e}")
@@ -533,8 +555,20 @@ Provide a brief, factual summary under {max_length//2} words. If no current info
             if not response_text:
                 return None
             
+            decision = self._parse_trading_decision(response_text)
+            
+            # Log the query and response
+            asyncio.create_task(self._log_query(
+                strategy="directional_trading",
+                query_type="tier2_full" if not use_simplified else "tier2_simplified",
+                prompt=prompt,
+                response=response_text,
+                market_id=market_data.get('ticker'),
+                cost_usd=cost
+            ))
+            
             # Parse the JSON response
-            return self._parse_trading_decision(response_text)
+            return decision
             
         except Exception as e:
             self.logger.error(f"Error in _get_trading_decision_with_prompt (simplified={use_simplified}): {str(e)}")
